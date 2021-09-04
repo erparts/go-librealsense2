@@ -1,4 +1,4 @@
-module github.com/suutaku/golibrealsense2
+module github.com/suutaku/go-librealsense2
 
 go 1.16
 
