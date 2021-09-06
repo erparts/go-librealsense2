@@ -5,6 +5,13 @@ package librealsense2
 #cgo CPPFLAGS: -I/usr/local/include
 #include <librealsense2/rs.h>
 #include <librealsense2/h/rs_pipeline.h>
+#include <stdio.h>
+	void print_device_info(rs2_device* dev){
+    rs2_error* e = 0;
+    printf("\nUsing device 0, an %s\n", rs2_get_device_info(dev, RS2_CAMERA_INFO_NAME, &e));
+    printf("    Serial number: %s\n", rs2_get_device_info(dev, RS2_CAMERA_INFO_SERIAL_NUMBER, &e));
+    printf("    Firmware version: %s\n\n", rs2_get_device_info(dev, RS2_CAMERA_INFO_FIRMWARE_VERSION, &e));
+}
 */
 import "C"
 import (
@@ -46,7 +53,7 @@ func NewPipeline() *Pipeline {
 			fmt.Println(errorFrom(err))
 			continue
 		}
-		print_device_info(dev)
+		C.print_device_info(dev)
 		C.rs2_delete_device(dev)
 	}
 	p := C.rs2_create_pipeline(ctx, &err)
@@ -117,8 +124,6 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat) {
 			} else {
 				colorFrame <- &ret
 			}
-
 		}
 	}
-
 }
