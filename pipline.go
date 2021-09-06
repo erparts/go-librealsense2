@@ -87,6 +87,7 @@ func (pl *Pipeline) Close() error {
 	C.rs2_delete_pipeline_profile(pl.profile)
 	C.rs2_delete_config(pl.conf)
 	C.rs2_delete_pipeline(pl.p)
+	C.rs2_delete_context(pl.ctx)
 	return nil
 }
 
@@ -103,7 +104,6 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat) {
 	var err *C.rs2_error
 	for {
 		frames := C.rs2_pipeline_wait_for_frames(pl.p, C.RS2_DEFAULT_TIMEOUT, &err)
-		defer C.rs2_release_frame(frames)
 		if err != nil {
 			fmt.Println(errorFrom(err))
 			continue
@@ -115,7 +115,6 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat) {
 		}
 		for i := 0; i < int(count); i++ {
 			frame := C.rs2_extract_frame(frames, C.int(i), &err)
-			defer C.rs2_release_frame(frame)
 			rgb_frame_data := C.rs2_get_frame_data(frame, &err)
 			b := C.GoBytes(unsafe.Pointer(rgb_frame_data), 640*480*3)
 			ret, errg := gocv.NewMatFromBytes(640, 480, gocv.MatTypeCV8SC3, b)
@@ -124,6 +123,8 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat) {
 			} else {
 				colorFrame <- &ret
 			}
+			C.rs2_release_frame(frame)
 		}
+		C.rs2_release_frame(frames)
 	}
 }
