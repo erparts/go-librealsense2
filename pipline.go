@@ -6,6 +6,12 @@ package librealsense2
 #include <librealsense2/rs.h>
 #include <librealsense2/h/rs_pipeline.h>
 #include <stdio.h>
+#define STREAM          RS2_STREAM_COLOR  // rs2_stream is a types of data provided by RealSense device           //
+#define FORMAT          RS2_FORMAT_RGB8   // rs2_format identifies how binary data is encoded within a frame      //
+#define WIDTH           640               // Defines the number of columns for each frame                         //
+#define HEIGHT          480               // Defines the number of lines for each frame                           //
+#define FPS             30                // Defines the rate of frames per second                                //
+#define STREAM_INDEX    0
 	void print_device_info(rs2_device* dev){
     rs2_error* e = 0;
     printf("\nUsing device 0, an %s\n", rs2_get_device_info(dev, RS2_CAMERA_INFO_NAME, &e));
@@ -64,17 +70,13 @@ func NewPipeline() *Pipeline {
 	if err != nil {
 		panic(errorFrom(err))
 	}
-	C.rs2_config_enable_stream(conf, C.RS2_STREAM_COLOR, C.int(0), C.int(640), C.int(480), C.RS2_FORMAT_RGB8, C.int(30), &err)
-	prof := C.rs2_pipeline_start_with_config(p, conf, &err)
-	if err != nil {
-		panic(errorFrom(err))
-	}
+	C.rs2_config_enable_stream(conf, C.STREAM, C.STREAM_INDEX, C.WIDTH, C.HEIGHT, C.FORMAT, C.FPS, &err)
+
 	C.rs2_delete_device_list(device_list)
 	return &Pipeline{
-		p:       p,
-		ctx:     ctx,
-		conf:    conf,
-		profile: prof,
+		p:    p,
+		ctx:  ctx,
+		conf: conf,
 	}
 }
 
@@ -93,10 +95,11 @@ func (pl *Pipeline) Close() error {
 
 func (pl *Pipeline) Start() error {
 	var err *C.rs2_error
-	C.rs2_pipeline_start_with_config(pl.p, pl.conf, &err)
+	prof := C.rs2_pipeline_start_with_config(pl.p, pl.conf, &err)
 	if err != nil {
 		return errorFrom(err)
 	}
+	pl.profile = prof
 	return nil
 }
 
