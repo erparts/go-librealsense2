@@ -5,26 +5,24 @@ package librealsense2
 #cgo CPPFLAGS: -I/usr/local/include
 #include <librealsense2/rs.h>
 #include <librealsense2/h/rs_pipeline.h>
-#include <stdio.h>
 #define STREAM          RS2_STREAM_DEPTH  // rs2_stream is a types of data provided by RealSense device           //
 #define FORMAT          RS2_FORMAT_Z16    // rs2_format identifies how binary data is encoded within a frame      //
 #define WIDTH           640               // Defines the number of columns for each frame                         //
 #define HEIGHT          480               // Defines the number of lines for each frame                           //
 #define FPS             30                // Defines the rate of frames per second                                //
 #define STREAM_INDEX    0
-	void print_device_info(rs2_device* dev){
-    rs2_error* e = 0;
-    printf("\nUsing device 0, an %s\n", rs2_get_device_info(dev, RS2_CAMERA_INFO_NAME, &e));
-    printf("    Serial number: %s\n", rs2_get_device_info(dev, RS2_CAMERA_INFO_SERIAL_NUMBER, &e));
-    printf("    Firmware version: %s\n\n", rs2_get_device_info(dev, RS2_CAMERA_INFO_FIRMWARE_VERSION, &e));
-}
 */
 import "C"
 import (
+	"errors"
 	"fmt"
 	"unsafe"
 
 	"gocv.io/x/gocv"
+)
+
+var (
+	ErrNotDevicesFound = errors.New("no realsense devices found")
 )
 
 type Pipeline struct {
@@ -34,50 +32,73 @@ type Pipeline struct {
 	profile *C.rs2_pipeline_profile
 }
 
-func NewPipeline() *Pipeline {
+type PipelineConfig struct {
+	Serial string
+}
+
+func NewPipeline(cfg *PipelineConfig) (*Pipeline, error) {
 	var err *C.rs2_error
 	ctx := C.rs2_create_context(C.RS2_API_VERSION, &err)
 	if err != nil {
-		panic(errorFrom(err))
+		return nil, errorFrom(err)
 	}
+
 	device_list := C.rs2_query_devices(ctx, &err)
 	if err != nil {
-		panic(errorFrom(err))
+		return nil, errorFrom(err)
 	}
 
 	dev_count := C.rs2_get_device_count(device_list, &err)
 	if err != nil {
-		panic(errorFrom(err))
+		return nil, errorFrom(err)
 	}
-	fmt.Printf("There are %d connected RealSense devices.\n", int(dev_count))
+
 	if C.int(dev_count) == 0 {
-		panic("cannot found device")
+		return nil, ErrNotDevicesFound
 	}
-	for i := 0; i < int(dev_count); i++ {
-		dev := C.rs2_create_device(device_list, C.int(i), &err)
-		if err != nil {
-			fmt.Println(errorFrom(err))
-			continue
-		}
-		C.print_device_info(dev)
-		C.rs2_delete_device(dev)
-	}
-	p := C.rs2_create_pipeline(ctx, &err)
-	if err != nil {
-		panic(errorFrom(err))
-	}
+
 	conf := C.rs2_create_config(&err)
 	if err != nil {
-		panic(errorFrom(err))
+		return nil, errorFrom(err)
 	}
+
+	if cfg.Serial != "" {
+		for i := 0; i < int(dev_count); i++ {
+			dev := C.rs2_create_device(device_list, C.int(i), &err)
+			if err != nil {
+				fmt.Println(errorFrom(err))
+				continue
+			}
+
+			s := C.rs2_get_device_info(dev, C.RS2_CAMERA_INFO_SERIAL_NUMBER, &err)
+			if C.GoString(s) == cfg.Serial {
+				if C.rs2_config_enable_device(conf, s, &err); err != nil {
+					return nil, errorFrom(err)
+				}
+			}
+
+			C.rs2_delete_device(dev)
+		}
+	}
+
+	p := C.rs2_create_pipeline(ctx, &err)
+	if err != nil {
+		return nil, errorFrom(err)
+	}
+
 	C.rs2_config_enable_stream(conf, C.STREAM, C.STREAM_INDEX, C.WIDTH, C.HEIGHT, C.FORMAT, C.FPS, &err)
 
+	if err != nil {
+		return nil, errorFrom(err)
+	}
+
 	C.rs2_delete_device_list(device_list)
+
 	return &Pipeline{
 		p:    p,
 		ctx:  ctx,
 		conf: conf,
-	}
+	}, nil
 }
 
 func (pl *Pipeline) Close() error {
@@ -125,10 +146,12 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat) {
 				continue
 			}
 
+			//fmt.Println(size)
+
 			rgb_frame_data := C.rs2_get_frame_data(frame, &err)
 			b := C.GoBytes(unsafe.Pointer(rgb_frame_data), 640*480*2)
 
-			ret, errg := gocv.NewMatFromBytes(480, 640, gocv.MatTypeCV16SC1, b)
+			ret, errg := gocv.NewMatFromBytes(480, 640, gocv.MatTypeCV16UC1, b)
 			if errg != nil {
 				fmt.Println(errg)
 			} else {
