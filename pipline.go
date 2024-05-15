@@ -16,10 +16,13 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"time"
 	"unsafe"
 
 	"gocv.io/x/gocv"
 )
+
+const DefaultTimeout = time.Second * 15
 
 var (
 	ErrNotDevicesFound = errors.New("no realsense devices found")
@@ -124,13 +127,16 @@ func (pl *Pipeline) Start() error {
 	return nil
 }
 
-func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat) {
+func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Duration) error {
+	if timeout == 0 {
+		timeout = DefaultTimeout
+	}
+
 	var err *C.rs2_error
 	for {
-		frames := C.rs2_pipeline_wait_for_frames(pl.p, C.RS2_DEFAULT_TIMEOUT, &err)
+		frames := C.rs2_pipeline_wait_for_frames(pl.p, C.uint(1000), &err)
 		if err != nil {
-			fmt.Println(errorFrom(err))
-			continue
+			return errorFrom(err)
 		}
 
 		count := C.rs2_embedded_frames_count(frames, &err)
