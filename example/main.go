@@ -4,7 +4,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/erparts/go-librealsense2"
+	"github.com/erparts/go-librealsense2/v2"
 	"gocv.io/x/gocv"
 )
 
