@@ -16,7 +16,7 @@ import (
 	"gocv.io/x/gocv"
 )
 
-const DefaultTimeout = time.Second * 15
+const defaultTimeout = time.Second
 
 var (
 	ErrNotDevicesFound = errors.New("no realsense devices found")
@@ -30,43 +30,13 @@ const (
 )
 
 type Pipeline struct {
-	cfg *PipelineConfig
-
 	p       *C.rs2_pipeline
 	ctx     *C.rs2_context
 	conf    *C.rs2_config
 	profile *C.rs2_pipeline_profile
 }
 
-type PipelineConfig struct {
-	Serial        string
-	Width, Height int
-	FPS           int
-	DepthStream   bool
-	ColorStream   bool
-}
-
-func (c *PipelineConfig) Initialize() {
-	if c.Width == 0 {
-		c.Width = 640
-	}
-
-	if c.Height == 0 {
-		c.Height = 480
-	}
-
-	if c.FPS == 0 {
-		c.FPS = 30
-	}
-
-	if !c.ColorStream && !c.DepthStream {
-		c.DepthStream = true
-	}
-}
-
-func NewPipeline(cfg *PipelineConfig) (*Pipeline, error) {
-	cfg.Initialize()
-
+func NewPipeline(serial string) (*Pipeline, error) {
 	var err *C.rs2_error
 	ctx := C.rs2_create_context(C.RS2_API_VERSION, &err)
 	if err != nil {
@@ -92,7 +62,7 @@ func NewPipeline(cfg *PipelineConfig) (*Pipeline, error) {
 		return nil, errorFrom(err)
 	}
 
-	if cfg.Serial != "" {
+	if serial != "" {
 		for i := 0; i < int(dev_count); i++ {
 			dev := C.rs2_create_device(device_list, C.int(i), &err)
 			if err != nil {
@@ -101,7 +71,7 @@ func NewPipeline(cfg *PipelineConfig) (*Pipeline, error) {
 			}
 
 			s := C.rs2_get_device_info(dev, C.RS2_CAMERA_INFO_SERIAL_NUMBER, &err)
-			if C.GoString(s) == cfg.Serial {
+			if C.GoString(s) == serial {
 				if C.rs2_config_enable_device(conf, s, &err); err != nil {
 					return nil, errorFrom(err)
 				}
@@ -119,7 +89,6 @@ func NewPipeline(cfg *PipelineConfig) (*Pipeline, error) {
 	C.rs2_delete_device_list(device_list)
 
 	pl := &Pipeline{
-		cfg:  cfg,
 		p:    p,
 		ctx:  ctx,
 		conf: conf,
@@ -176,12 +145,14 @@ func (pl *Pipeline) Start() error {
 
 func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Duration) error {
 	if timeout == 0 {
-		timeout = DefaultTimeout
+		timeout = defaultTimeout
 	}
+
+	ms := timeout.Milliseconds()
 
 	var errc *C.rs2_error
 	for {
-		frames := C.rs2_pipeline_wait_for_frames(pl.p, C.uint(1000), &errc)
+		frames := C.rs2_pipeline_wait_for_frames(pl.p, C.uint(ms), &errc)
 		if errc != nil {
 			return errorFrom(errc)
 		}

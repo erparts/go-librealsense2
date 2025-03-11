@@ -2,16 +2,14 @@ package main
 
 import (
 	"log"
+	"time"
 
 	"github.com/erparts/go-librealsense2"
 	"gocv.io/x/gocv"
 )
 
 func main() {
-	pipeline, err := librealsense2.NewPipeline(&librealsense2.PipelineConfig{
-		DepthStream: true,
-		ColorStream: true,
-	})
+	pipeline, err := librealsense2.NewPipeline("")
 	if err != nil {
 		log.Fatalf("Failed to create pipeline: %v", err)
 	}
@@ -66,7 +64,7 @@ func main() {
 		}
 	}()
 
-	if err := pipeline.WaitColorFrames(ch, 5000); err != nil {
+	if err := pipeline.WaitColorFrames(ch, time.Second); err != nil {
 		log.Println("Error waiting for frames:", err)
 	}
 }
