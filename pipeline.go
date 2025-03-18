@@ -34,6 +34,8 @@ type Pipeline struct {
 	ctx     *C.rs2_context
 	conf    *C.rs2_config
 	profile *C.rs2_pipeline_profile
+
+	filters []*Filter
 }
 
 func NewPipeline(serial string) (*Pipeline, error) {
@@ -133,6 +135,21 @@ func (pl *Pipeline) Close() error {
 }
 
 func (pl *Pipeline) Start() error {
+	pl.filters = []*Filter{
+		//NewFilter(Decimation),
+		//ThresholdFilter(5, 10),
+		DefaultDecimationFilter(),
+		DepthDisparityFilter(),
+		DefaultSpatialFilter(),
+		DefaultTemporalFilter(),
+		DefaultHoleFillingFilter(),
+		DisparityToDepthFilter(),
+	}
+
+	for _, f := range pl.filters {
+		f.initialize()
+	}
+
 	var err *C.rs2_error
 	prof := C.rs2_pipeline_start_with_config(pl.p, pl.conf, &err)
 	if err != nil {
@@ -148,9 +165,18 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Dura
 		timeout = defaultTimeout
 	}
 
+	var errc *C.rs2_error
+	decimated_queue := C.rs2_create_frame_queue(1, &errc)
+	spatial_queue := C.rs2_create_frame_queue(1, &errc)
+	// Creating processing blocks/ filters
+	decimation_filter := C.rs2_create_decimation_filter_block(&errc)
+	spatial_filter := C.rs2_create_spatial_filter_block(&errc)
+
+	C.rs2_start_processing_queue(decimation_filter, decimated_queue, &errc)
+	C.rs2_start_processing_queue(spatial_filter, spatial_queue, &errc)
+
 	ms := timeout.Milliseconds()
 
-	var errc *C.rs2_error
 	for {
 		frames := C.rs2_pipeline_wait_for_frames(pl.p, C.uint(ms), &errc)
 		if errc != nil {
@@ -170,6 +196,17 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Dura
 			frame := C.rs2_extract_frame(frames, C.int(i), &errc)
 			if frame == nil {
 				continue
+			}
+
+			if C.rs2_is_frame_extendable_to(frame, C.RS2_EXTENSION_DEPTH_FRAME, &errc) != 0 {
+				for _, f := range pl.filters {
+					other, err := f.Apply(frame, 0)
+					if err != nil {
+						return err
+					}
+
+					frame = other
+				}
 			}
 
 			w := C.rs2_get_frame_width(frame, &errc)
