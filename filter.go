@@ -13,12 +13,11 @@ import (
 	"unsafe"
 )
 
+// FilterType is a type of filter.
 type FilterType int
 
 const (
 	Decimation FilterType = iota
-	HDRMerge
-	FilterBySequenceID
 	Threshold
 	DepthDisparity
 	Spatial
@@ -28,16 +27,21 @@ const (
 	RatesPrinter
 )
 
+// Filter Librealsense implementation includes post-processing filters to enhance
+// the quality of depth data and reduce noise levels. All the filters are
+// implemented in the library core as independent blocks to be used in the
+// customer code
 type Filter struct {
-	t FilterType
-
-	queue   *C.rs2_frame_queue
-	filter  *C.rs2_processing_block
+	typ     FilterType
 	options map[int]float64
+
+	queue  *C.rs2_frame_queue
+	filter *C.rs2_processing_block
 }
 
+// NewFilter creates a new filter of the given type.
 func NewFilter(t FilterType) *Filter {
-	return &Filter{t: t}
+	return &Filter{typ: t}
 }
 
 func (f *Filter) initialize() error {
@@ -48,7 +52,7 @@ func (f *Filter) initialize() error {
 		return errorFrom(errc)
 	}
 
-	switch f.t {
+	switch f.typ {
 	case Decimation:
 		f.filter = C.rs2_create_decimation_filter_block(&errc)
 	case Spatial:
@@ -86,6 +90,7 @@ func (f *Filter) initialize() error {
 	return nil
 }
 
+// Apply applies the filter to the given frame.
 func (f *Filter) Apply(frame *C.rs2_frame, timeout time.Duration) (*C.rs2_frame, error) {
 	if timeout == 0 {
 		timeout = defaultTimeout
@@ -97,7 +102,8 @@ func (f *Filter) Apply(frame *C.rs2_frame, timeout time.Duration) (*C.rs2_frame,
 		return nil, errorFrom(errc)
 	}
 
-	result := C.rs2_wait_for_frame(f.queue, 1000, &errc)
+	ms := timeout.Milliseconds()
+	result := C.rs2_wait_for_frame(f.queue, C.uint(ms), &errc)
 	if errc != nil {
 		return nil, errorFrom(errc)
 	}
@@ -105,9 +111,17 @@ func (f *Filter) Apply(frame *C.rs2_frame, timeout time.Duration) (*C.rs2_frame,
 	return result, nil
 }
 
+// Close closes the filter.
+func (f *Filter) Close() error {
+	C.rs2_delete_processing_block(f.filter)
+	C.rs2_delete_frame_queue(f.queue)
+	return nil
+}
+
+// ThresholdFilter filters by min and max distance, in meters.
 func ThresholdFilter(min, max float64) *Filter {
 	return &Filter{
-		t: Threshold,
+		typ: Threshold,
 		options: map[int]float64{
 			C.RS2_OPTION_MIN_DISTANCE: min,
 			C.RS2_OPTION_MAX_DISTANCE: max,
@@ -115,15 +129,17 @@ func ThresholdFilter(min, max float64) *Filter {
 	}
 }
 
+// DisparityToDepthFilter if we are in disparity domain, switch back to depth.
 func DisparityToDepthFilter() *Filter {
 	return &Filter{
-		t: DisparityToDepth,
+		typ: DisparityToDepth,
 	}
 }
 
+// DepthDisparityFilter change to disparity domain.
 func DepthDisparityFilter() *Filter {
 	return &Filter{
-		t: DepthDisparity,
+		typ: DepthDisparity,
 	}
 }
 
@@ -165,7 +181,7 @@ func TemporalFilter(smoothAlpha, smoothDelta, persistency float64) *Filter {
 	}
 
 	return &Filter{
-		t: Temporal,
+		typ: Temporal,
 		options: map[int]float64{
 			C.RS2_OPTION_FILTER_SMOOTH_ALPHA: smoothAlpha,
 			C.RS2_OPTION_FILTER_SMOOTH_DELTA: smoothDelta,
@@ -185,7 +201,7 @@ func DefaultDecimationFilter() *Filter {
 // depth is used due to performance considerations.
 func DecimationFilter(magnitude float64) *Filter {
 	return &Filter{
-		t: Decimation,
+		typ: Decimation,
 		options: map[int]float64{
 			C.RS2_OPTION_FILTER_MAGNITUDE: magnitude,
 		},
@@ -212,7 +228,7 @@ func HoleFillingFilter(mode float64) *Filter {
 	}
 
 	return &Filter{
-		t: HoleFilling,
+		typ: HoleFilling,
 		options: map[int]float64{
 			C.RS2_OPTION_HOLES_FILL: mode,
 		},
@@ -235,12 +251,12 @@ func SpatialFilter(magnitude, smoothAlpha, smoothDelta float64) *Filter {
 		panic("smoothAlpha must be between 0.25 and 1")
 	}
 
-	if smoothDelta < 1 || smoothDelta > 10 {
-		panic("smoothDelta must be between 1 and 10")
+	if smoothDelta < 1 || smoothDelta > 50 {
+		panic("smoothDelta must be between 1 and 50")
 	}
 
 	return &Filter{
-		t: Spatial,
+		typ: Spatial,
 		options: map[int]float64{
 			C.RS2_OPTION_FILTER_SMOOTH_ALPHA: smoothAlpha,
 			C.RS2_OPTION_FILTER_SMOOTH_DELTA: smoothDelta,

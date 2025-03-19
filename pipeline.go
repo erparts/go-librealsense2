@@ -22,6 +22,7 @@ var (
 	ErrNotDevicesFound = errors.New("no realsense devices found")
 )
 
+// Stream is a RealSense data stream.
 type Stream C.rs2_stream
 
 const (
@@ -29,6 +30,8 @@ const (
 	StreamColor Stream = C.RS2_STREAM_COLOR
 )
 
+// Pipepline represents a realsense pipeline, includes a device and a selection
+// of active streams.
 type Pipeline struct {
 	p       *C.rs2_pipeline
 	ctx     *C.rs2_context
@@ -38,6 +41,8 @@ type Pipeline struct {
 	filters []*Filter
 }
 
+// NewPipeline creates a new pipeline with the given serial number. If serial is
+// empty, the first device will be used.
 func NewPipeline(serial string) (*Pipeline, error) {
 	var err *C.rs2_error
 	ctx := C.rs2_create_context(C.RS2_API_VERSION, &err)
@@ -99,7 +104,8 @@ func NewPipeline(serial string) (*Pipeline, error) {
 	return pl, nil
 }
 
-func (pl *Pipeline) EnableStream(stream Stream, width, height, fps int) error {
+// EnableStream enables a stream with the given width, height and fps.
+func (p *Pipeline) EnableStream(stream Stream, width, height, fps int) error {
 	var format C.rs2_format
 	switch stream {
 	case StreamDepth:
@@ -111,7 +117,7 @@ func (pl *Pipeline) EnableStream(stream Stream, width, height, fps int) error {
 	}
 
 	var err *C.rs2_error
-	C.rs2_config_enable_stream(pl.conf, C.rs2_stream(stream), 0, C.int(width), C.int(height), format, C.int(fps), &err)
+	C.rs2_config_enable_stream(p.conf, C.rs2_stream(stream), 0, C.int(width), C.int(height), format, C.int(fps), &err)
 
 	if err != nil {
 		return errorFrom(err)
@@ -120,72 +126,95 @@ func (pl *Pipeline) EnableStream(stream Stream, width, height, fps int) error {
 	return nil
 }
 
-func (pl *Pipeline) Close() error {
-	var err *C.rs2_error
-	C.rs2_pipeline_stop(pl.p, &err)
-	if err != nil {
-		return errorFrom(err)
-	}
-
-	C.rs2_delete_pipeline_profile(pl.profile)
-	C.rs2_delete_config(pl.conf)
-	C.rs2_delete_pipeline(pl.p)
-	C.rs2_delete_context(pl.ctx)
-	return nil
-}
-
-func (pl *Pipeline) Start() error {
-	pl.filters = []*Filter{
-		//NewFilter(Decimation),
-		//ThresholdFilter(5, 10),
+// SetDefaultPostProcessingFilters sets the default post-processing filters.
+func (p *Pipeline) SetDefaultPostProcessingFilters() {
+	p.SetPostProcessingFilters(
 		DefaultDecimationFilter(),
 		DepthDisparityFilter(),
 		DefaultSpatialFilter(),
 		DefaultTemporalFilter(),
 		DefaultHoleFillingFilter(),
 		DisparityToDepthFilter(),
-	}
+	)
+}
 
-	for _, f := range pl.filters {
+// SetPostProcessingFilters sets the post-processing filters to be applied to the
+// frames. The post-processing filters are designed and built for
+// concatenation into processing pipes. There are no software-imposed constraints
+// that mandate the order in which the filters shall be applied. At the same
+// time the recommended scheme used in librealsense tools and demos is elaborated
+// below:
+//
+// Depth Frame >> Decimation Filter >> Depth2Disparity Transform** >>
+// Spatial Filter >> Temporal Filter >> Disparity2Depth Transform** >>
+// Hole Filling Filter >> Filtered Depth.
+func (p *Pipeline) SetPostProcessingFilters(f ...*Filter) {
+	p.filters = f
+}
+
+// Start starts the pipeline.
+func (p *Pipeline) Start() error {
+	for _, f := range p.filters {
 		f.initialize()
 	}
 
 	var err *C.rs2_error
-	prof := C.rs2_pipeline_start_with_config(pl.p, pl.conf, &err)
+	prof := C.rs2_pipeline_start_with_config(p.p, p.conf, &err)
 	if err != nil {
 		return errorFrom(err)
 	}
 
-	pl.profile = prof
+	p.profile = prof
 	return nil
 }
 
-func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Duration) error {
+// Close closes the pipeline and frees all resources.
+func (p *Pipeline) Close() error {
+	var err *C.rs2_error
+	C.rs2_pipeline_stop(p.p, &err)
+	if err != nil {
+		return errorFrom(err)
+	}
+
+	C.rs2_delete_pipeline_profile(p.profile)
+	C.rs2_delete_config(p.conf)
+	C.rs2_delete_pipeline(p.p)
+	C.rs2_delete_context(p.ctx)
+
+	var errs []error
+	for _, f := range p.filters {
+		if err := f.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// WaitFrames waits for frames from the pipeline. Color and depth frames are
+// sent to the frame channel. If an error occurs, it is sent to the error channel.
+// If the error channel is nil, the error is ignored.
+func (p *Pipeline) WaitFrames(frameCh chan *gocv.Mat, errCh chan error, timeout time.Duration) error {
 	if timeout == 0 {
 		timeout = defaultTimeout
 	}
 
-	var errc *C.rs2_error
-	decimated_queue := C.rs2_create_frame_queue(1, &errc)
-	spatial_queue := C.rs2_create_frame_queue(1, &errc)
-	// Creating processing blocks/ filters
-	decimation_filter := C.rs2_create_decimation_filter_block(&errc)
-	spatial_filter := C.rs2_create_spatial_filter_block(&errc)
-
-	C.rs2_start_processing_queue(decimation_filter, decimated_queue, &errc)
-	C.rs2_start_processing_queue(spatial_filter, spatial_queue, &errc)
-
 	ms := timeout.Milliseconds()
 
 	for {
-		frames := C.rs2_pipeline_wait_for_frames(pl.p, C.uint(ms), &errc)
+		var errc *C.rs2_error
+		frames := C.rs2_pipeline_wait_for_frames(p.p, C.uint(ms), &errc)
 		if errc != nil {
-			return errorFrom(errc)
+			if errCh != nil {
+				errCh <- errorFrom(errc)
+			}
+
+			continue
 		}
 
 		count := C.rs2_embedded_frames_count(frames, &errc)
 		if errc != nil {
-			fmt.Println(errorFrom(errc))
+			errCh <- errorFrom(errc)
 			continue
 		}
 
@@ -199,13 +228,15 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Dura
 			}
 
 			if C.rs2_is_frame_extendable_to(frame, C.RS2_EXTENSION_DEPTH_FRAME, &errc) != 0 {
-				for _, f := range pl.filters {
-					other, err := f.Apply(frame, 0)
+				for _, f := range p.filters {
+					filtered, err := f.Apply(frame, 0)
 					if err != nil {
-						return err
+						if errCh != nil {
+							errCh <- errorFrom(errc)
+						}
 					}
 
-					frame = other
+					frame = filtered
 				}
 			}
 
@@ -213,31 +244,43 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Dura
 			h := C.rs2_get_frame_height(frame, &errc)
 
 			t := gocv.MatTypeCV8UC3
-			var b []byte
-			var sz C.int
-
-			rgb_frame_data := C.rs2_get_frame_data(frame, &errc)
-
-			if C.rs2_is_frame_extendable_to(frame, C.RS2_EXTENSION_DEPTH_FRAME, &errc) == 0 {
-				t = gocv.MatTypeCV8UC3
-				sz = w * h * 3
-			} else {
+			sz := w * h * 3
+			if C.rs2_is_frame_extendable_to(frame, C.RS2_EXTENSION_DEPTH_FRAME, &errc) != 0 {
 				t = gocv.MatTypeCV16UC1
 				sz = w * h * 2
 			}
 
-			b = C.GoBytes(unsafe.Pointer(rgb_frame_data), C.int(sz))
+			frameData := C.rs2_get_frame_data(frame, &errc)
+			if errc != nil {
+				if errCh != nil {
+					errCh <- errorFrom(errc)
+				}
+
+				continue
+			}
+
+			b := C.GoBytes(unsafe.Pointer(frameData), C.int(sz))
 			ret, err = gocv.NewMatFromBytes(int(h), int(w), t, b)
 			if err != nil {
-				fmt.Println(err)
+				if errCh != nil {
+					errCh <- err
+				}
 			} else {
-				colorFrame <- &ret
+				frameCh <- &ret
 			}
 
 			C.rs2_release_frame(frame)
-
 		}
 
 		C.rs2_release_frame(frames)
 	}
+}
+
+func errorFrom(err *C.rs2_error) error {
+	if err == nil {
+		return nil
+	}
+
+	defer C.rs2_free_error(err)
+	return fmt.Errorf(C.GoString(C.rs2_get_error_message(err)))
 }

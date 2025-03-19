@@ -16,15 +16,17 @@ func main() {
 	defer pipeline.Close()
 
 	if err := pipeline.EnableStream(librealsense2.StreamDepth, 640, 480, 30); err != nil {
-		log.Fatalf("Failed to enable depth stream: %v", err)
+		log.Fatalf("failed to enable depth stream: %v", err)
 	}
 
 	if err := pipeline.EnableStream(librealsense2.StreamColor, 640, 480, 30); err != nil {
-		log.Fatalf("Failed to enable color stream: %v", err)
+		log.Fatalf("failed to enable color stream: %v", err)
 	}
 
+	pipeline.SetDefaultPostProcessingFilters()
+
 	if err := pipeline.Start(); err != nil {
-		log.Fatalf("Failed to start pipeline: %v", err)
+		log.Fatalf("failed to start pipeline: %v", err)
 	}
 
 	windowDepth := gocv.NewWindow("Depth")
@@ -33,38 +35,43 @@ func main() {
 	defer windowColor.Close()
 
 	ch := make(chan *gocv.Mat, 1)
+	errCh := make(chan error, 1)
 	go func() {
 		for {
-			frame := <-ch
-			if frame == nil {
-				continue
+			select {
+			case err := <-errCh:
+				log.Println("error waiting for frames:", err)
+			case frame := <-ch:
+				if frame == nil {
+					continue
+				}
+
+				switch frame.Type() {
+				case gocv.MatTypeCV8UC3:
+					windowColor.IMShow(*frame)
+					windowColor.WaitKey(1)
+				case gocv.MatTypeCV16UC1:
+					depthImage := gocv.NewMat()
+					frame.ConvertToWithParams(&depthImage, gocv.MatTypeCV8UC1, 255.0/5535.0, 0)
+
+					coloredDepth := gocv.NewMat()
+					gocv.ApplyColorMap(depthImage, &coloredDepth, gocv.ColormapJet)
+
+					windowDepth.IMShow(coloredDepth)
+					windowDepth.WaitKey(1)
+
+					depthImage.Close()
+					coloredDepth.Close()
+				default:
+					log.Println("unknown frame type:", frame.Type())
+				}
+
+				frame.Close()
 			}
-
-			switch frame.Type() {
-			case gocv.MatTypeCV8UC3:
-				windowColor.IMShow(*frame)
-				windowColor.WaitKey(1)
-			case gocv.MatTypeCV16UC1:
-				depthImage := gocv.NewMat()
-				frame.ConvertToWithParams(&depthImage, gocv.MatTypeCV8UC1, 255.0/5535.0, 0)
-
-				coloredDepth := gocv.NewMat()
-				gocv.ApplyColorMap(depthImage, &coloredDepth, gocv.ColormapJet)
-
-				windowDepth.IMShow(coloredDepth)
-				windowDepth.WaitKey(1)
-
-				depthImage.Close()
-				coloredDepth.Close()
-			default:
-				log.Println("Unknown frame type:", frame.Type())
-			}
-
-			frame.Close()
 		}
 	}()
 
-	if err := pipeline.WaitColorFrames(ch, time.Second); err != nil {
-		log.Println("Error waiting for frames:", err)
+	if err := pipeline.WaitFrames(ch, nil, time.Second); err != nil {
+		log.Println("error waiting for frames:", err)
 	}
 }
