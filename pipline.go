@@ -8,8 +8,10 @@ package librealsense2
 */
 import "C"
 import (
+	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 	"unsafe"
 
@@ -175,14 +177,55 @@ func (pl *Pipeline) Start() error {
 }
 
 func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Duration) error {
+	return pl.WaitColorFramesContext(context.Background(), colorFrame, timeout)
+}
+
+// WaitColorFramesContext sends frames until the pipeline fails or ctx is
+// cancelled. It never closes colorFrame; the goroutine that calls this method
+// owns that channel and can close it after the method returns.
+func (pl *Pipeline) WaitColorFramesContext(ctx context.Context, colorFrame chan<- *gocv.Mat, timeout time.Duration) error {
+	return pl.ProcessColorFramesContext(ctx, timeout, func(frame *gocv.Mat) error {
+		cloned := frame.Clone()
+		select {
+		case colorFrame <- &cloned:
+			return nil
+		case <-ctx.Done():
+			cloned.Close()
+			return ctx.Err()
+		}
+	})
+}
+
+// ProcessColorFramesContext invokes handler synchronously for every captured
+// frame. The Mat is borrowed and is only valid until handler returns. Keeping
+// processing synchronous lets the pipeline reuse one OpenCV allocation across
+// frames while callers that need ownership can still use WaitColorFramesContext.
+func (pl *Pipeline) ProcessColorFramesContext(ctx context.Context, timeout time.Duration, handler func(*gocv.Mat) error) error {
 	if timeout == 0 {
 		timeout = DefaultTimeout
 	}
+	timeoutMillis := timeout.Milliseconds()
+	if timeoutMillis < 1 {
+		timeoutMillis = 1
+	}
 
 	var errc *C.rs2_error
+	ret := gocv.NewMat()
+	defer ret.Close()
 	for {
-		frames := C.rs2_pipeline_wait_for_frames(pl.p, C.uint(1000), &errc)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		frames := C.rs2_pipeline_wait_for_frames(pl.p, C.uint(timeoutMillis), &errc)
 		if errc != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
 			return errorFrom(errc)
 		}
 
@@ -192,10 +235,8 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Dura
 			continue
 		}
 
+		var handlerErr error
 		for i := 0; i < int(count); i++ {
-			var ret gocv.Mat
-			var err error
-
 			frame := C.rs2_extract_frame(frames, C.int(i), &errc)
 			if frame == nil {
 				continue
@@ -218,18 +259,39 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Dura
 				sz = w * h * 2
 			}
 
-			b = C.GoBytes(unsafe.Pointer(rgb_frame_data), C.int(sz))
-			ret, err = gocv.NewMatFromBytes(int(h), int(w), t, b)
+			if ret.Rows() != int(h) || ret.Cols() != int(w) || ret.Type() != t {
+				ret.Close()
+				ret = gocv.NewMatWithSize(int(h), int(w), t)
+			}
+			b, err := ret.DataPtrUint8()
 			if err != nil {
 				fmt.Println(err)
+			} else if len(b) != int(sz) {
+				fmt.Printf("unexpected RealSense frame size: got %d bytes, want %d\n", len(b), int(sz))
 			} else {
-				colorFrame <- &ret
+				// Copy directly from the RealSense-owned frame into OpenCV-owned
+				// storage. C.GoBytes followed by NewMatFromBytes copied every
+				// frame twice through a multi-megabyte Go allocation, which made
+				// long-running high-resolution capture expand the Go heap.
+				srcHeader := reflect.SliceHeader{
+					Data: uintptr(unsafe.Pointer(rgb_frame_data)),
+					Len:  int(sz),
+					Cap:  int(sz),
+				}
+				copy(b, *(*[]byte)(unsafe.Pointer(&srcHeader)))
+				handlerErr = handler(&ret)
 			}
 
 			C.rs2_release_frame(frame)
+			if handlerErr != nil {
+				break
+			}
 
 		}
 
 		C.rs2_release_frame(frames)
+		if handlerErr != nil {
+			return handlerErr
+		}
 	}
 }
