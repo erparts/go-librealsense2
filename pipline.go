@@ -8,6 +8,7 @@ package librealsense2
 */
 import "C"
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -175,14 +176,36 @@ func (pl *Pipeline) Start() error {
 }
 
 func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Duration) error {
+	return pl.WaitColorFramesContext(context.Background(), colorFrame, timeout)
+}
+
+// WaitColorFramesContext sends frames until the pipeline fails or ctx is
+// cancelled. It never closes colorFrame; the goroutine that calls this method
+// owns that channel and can close it after the method returns.
+func (pl *Pipeline) WaitColorFramesContext(ctx context.Context, colorFrame chan<- *gocv.Mat, timeout time.Duration) error {
 	if timeout == 0 {
 		timeout = DefaultTimeout
+	}
+	timeoutMillis := timeout.Milliseconds()
+	if timeoutMillis < 1 {
+		timeoutMillis = 1
 	}
 
 	var errc *C.rs2_error
 	for {
-		frames := C.rs2_pipeline_wait_for_frames(pl.p, C.uint(1000), &errc)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		frames := C.rs2_pipeline_wait_for_frames(pl.p, C.uint(timeoutMillis), &errc)
 		if errc != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
 			return errorFrom(errc)
 		}
 
@@ -192,6 +215,7 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Dura
 			continue
 		}
 
+		cancelled := false
 		for i := 0; i < int(count); i++ {
 			var ret gocv.Mat
 			var err error
@@ -223,13 +247,24 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Dura
 			if err != nil {
 				fmt.Println(err)
 			} else {
-				colorFrame <- &ret
+				select {
+				case colorFrame <- &ret:
+				case <-ctx.Done():
+					ret.Close()
+					cancelled = true
+				}
 			}
 
 			C.rs2_release_frame(frame)
+			if cancelled {
+				break
+			}
 
 		}
 
 		C.rs2_release_frame(frames)
+		if cancelled {
+			return ctx.Err()
+		}
 	}
 }
