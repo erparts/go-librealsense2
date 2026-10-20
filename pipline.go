@@ -184,6 +184,23 @@ func (pl *Pipeline) WaitColorFrames(colorFrame chan *gocv.Mat, timeout time.Dura
 // cancelled. It never closes colorFrame; the goroutine that calls this method
 // owns that channel and can close it after the method returns.
 func (pl *Pipeline) WaitColorFramesContext(ctx context.Context, colorFrame chan<- *gocv.Mat, timeout time.Duration) error {
+	return pl.ProcessColorFramesContext(ctx, timeout, func(frame *gocv.Mat) error {
+		cloned := frame.Clone()
+		select {
+		case colorFrame <- &cloned:
+			return nil
+		case <-ctx.Done():
+			cloned.Close()
+			return ctx.Err()
+		}
+	})
+}
+
+// ProcessColorFramesContext invokes handler synchronously for every captured
+// frame. The Mat is borrowed and is only valid until handler returns. Keeping
+// processing synchronous lets the pipeline reuse one OpenCV allocation across
+// frames while callers that need ownership can still use WaitColorFramesContext.
+func (pl *Pipeline) ProcessColorFramesContext(ctx context.Context, timeout time.Duration, handler func(*gocv.Mat) error) error {
 	if timeout == 0 {
 		timeout = DefaultTimeout
 	}
@@ -193,6 +210,8 @@ func (pl *Pipeline) WaitColorFramesContext(ctx context.Context, colorFrame chan<
 	}
 
 	var errc *C.rs2_error
+	ret := gocv.NewMat()
+	defer ret.Close()
 	for {
 		select {
 		case <-ctx.Done():
@@ -216,10 +235,8 @@ func (pl *Pipeline) WaitColorFramesContext(ctx context.Context, colorFrame chan<
 			continue
 		}
 
-		cancelled := false
+		var handlerErr error
 		for i := 0; i < int(count); i++ {
-			var ret gocv.Mat
-
 			frame := C.rs2_extract_frame(frames, C.int(i), &errc)
 			if frame == nil {
 				continue
@@ -242,13 +259,14 @@ func (pl *Pipeline) WaitColorFramesContext(ctx context.Context, colorFrame chan<
 				sz = w * h * 2
 			}
 
-			ret = gocv.NewMatWithSize(int(h), int(w), t)
+			if ret.Rows() != int(h) || ret.Cols() != int(w) || ret.Type() != t {
+				ret.Close()
+				ret = gocv.NewMatWithSize(int(h), int(w), t)
+			}
 			b, err := ret.DataPtrUint8()
 			if err != nil {
-				ret.Close()
 				fmt.Println(err)
 			} else if len(b) != int(sz) {
-				ret.Close()
 				fmt.Printf("unexpected RealSense frame size: got %d bytes, want %d\n", len(b), int(sz))
 			} else {
 				// Copy directly from the RealSense-owned frame into OpenCV-owned
@@ -261,24 +279,19 @@ func (pl *Pipeline) WaitColorFramesContext(ctx context.Context, colorFrame chan<
 					Cap:  int(sz),
 				}
 				copy(b, *(*[]byte)(unsafe.Pointer(&srcHeader)))
-				select {
-				case colorFrame <- &ret:
-				case <-ctx.Done():
-					ret.Close()
-					cancelled = true
-				}
+				handlerErr = handler(&ret)
 			}
 
 			C.rs2_release_frame(frame)
-			if cancelled {
+			if handlerErr != nil {
 				break
 			}
 
 		}
 
 		C.rs2_release_frame(frames)
-		if cancelled {
-			return ctx.Err()
+		if handlerErr != nil {
+			return handlerErr
 		}
 	}
 }
