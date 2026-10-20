@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 	"unsafe"
 
@@ -218,7 +219,6 @@ func (pl *Pipeline) WaitColorFramesContext(ctx context.Context, colorFrame chan<
 		cancelled := false
 		for i := 0; i < int(count); i++ {
 			var ret gocv.Mat
-			var err error
 
 			frame := C.rs2_extract_frame(frames, C.int(i), &errc)
 			if frame == nil {
@@ -242,11 +242,25 @@ func (pl *Pipeline) WaitColorFramesContext(ctx context.Context, colorFrame chan<
 				sz = w * h * 2
 			}
 
-			b = C.GoBytes(unsafe.Pointer(rgb_frame_data), C.int(sz))
-			ret, err = gocv.NewMatFromBytes(int(h), int(w), t, b)
+			ret = gocv.NewMatWithSize(int(h), int(w), t)
+			b, err := ret.DataPtrUint8()
 			if err != nil {
+				ret.Close()
 				fmt.Println(err)
+			} else if len(b) != int(sz) {
+				ret.Close()
+				fmt.Printf("unexpected RealSense frame size: got %d bytes, want %d\n", len(b), int(sz))
 			} else {
+				// Copy directly from the RealSense-owned frame into OpenCV-owned
+				// storage. C.GoBytes followed by NewMatFromBytes copied every
+				// frame twice through a multi-megabyte Go allocation, which made
+				// long-running high-resolution capture expand the Go heap.
+				srcHeader := reflect.SliceHeader{
+					Data: uintptr(unsafe.Pointer(rgb_frame_data)),
+					Len:  int(sz),
+					Cap:  int(sz),
+				}
+				copy(b, *(*[]byte)(unsafe.Pointer(&srcHeader)))
 				select {
 				case colorFrame <- &ret:
 				case <-ctx.Done():
